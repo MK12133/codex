@@ -1,0 +1,254 @@
+import { inngest } from "./client";
+import { openai, createAgent, createTool, createNetwork, gemini, type Tool, Message, createState } from "@inngest/agent-kit";
+import { Sandbox } from "@e2b/code-interpreter";
+import { getSandbox, lastAssitantTextMessageContent } from "./utils";
+import z from "zod";
+import prisma from "@/lib/db";
+import { FRAGMENT_TITLE_PROMPT, PROMPT, RESPONSE_PROMPT } from "@/prompt";
+
+
+
+interface AgentState{
+  summary : string;
+  files : {[path:string] : string};
+};
+
+export const codeAgentFunction = inngest.createFunction(
+  { id: "code-agent" },
+  { event: "code-agent/run" },
+  async ({ event, step }) => {
+    const sandboxId = await step.run("get-sandbox-id", async () => {
+      const sandbox = await Sandbox.create("codex-nextjs-test-v2");
+      await sandbox.setTimeout(1000 * 60 * 30)
+      return sandbox.sandboxId;
+    });
+
+    const getPrevMessages = await step.run("get-prev-messages",async()=>{
+      const formattedMessage : Message[] = [];
+      const messages = await prisma.message.findMany({
+        where : {
+          projectId : event.data.projectId,
+        },
+        orderBy : {
+          createdAt : "desc"
+        },
+        take : 3,
+      });
+
+      for (const message of messages){
+        formattedMessage.push({
+          type : "text",
+          role : message.role === "ASSISTANT" ? "assistant" : "user",
+          content : message.content
+        })
+      }
+      return formattedMessage.reverse();
+    })
+
+
+
+    const state = createState<AgentState>({
+      summary : "",
+      files : {}
+    },{messages : getPrevMessages});
+
+    const codeAgent = createAgent<AgentState>({
+      name: "code-agent",
+      description : "An expert coding agent",
+      system:PROMPT,
+      model: openai({model : "gpt-4.1",defaultParameters : {temperature : 0.1}}),
+      tools: [
+        createTool({
+          name: "terminal",
+          description: "Use the Terminal to run commands",
+          parameters: z.object({ command: z.string() }),
+          handler: async ({ command }, { step }) => {
+            return step?.run("terminal", async () => {
+              const buffer = { stdout: "", stderr: "" };
+              try {
+                const sandbox = await getSandbox(sandboxId);
+                const result = await sandbox.commands.run(command, {
+                  onStdout: (data: string) => {
+                    buffer.stdout += data;
+                  },
+                  onStderr: (data: string) => {
+                    buffer.stderr += data;
+                  },
+                });
+                return result.stdout;
+              } catch (e) {
+                console.error(
+                  `Command Failed: ${e} \nstdout: ${buffer.stdout}\nstderr: ${buffer.stderr}`
+                );
+                return `Command Failed: ${e} \nstdout: ${buffer.stdout}\nstderr: ${buffer.stderr}`;
+              }
+            });
+          },
+        }),
+        createTool({
+          name: "createOrUpdateFiles",
+          description: "Create or update files in the sandbox",
+          parameters: z.object({
+            files: z.array(
+              z.object({
+                path: z.string(),
+                content: z.string(),
+              })
+            ),
+          }),
+          handler: async ({ files }, 
+            { network, step }:Tool.Options<AgentState>
+          ) => {
+            const newFiles = await step?.run("createOrUpdateFiles", async () => {
+              try {
+                const updatedFiles = network.state.data.files || {};
+                const sandbox = await getSandbox(sandboxId);
+                for (const file of files) {
+                  await sandbox.files.write(file.path, file.content);
+                  updatedFiles[file.path] = file.content;
+                }
+                return updatedFiles;
+              } catch (error) {
+                return "Error: " + error;
+              }
+            });
+            if (typeof newFiles === "object") {
+              network.state.data.files = newFiles;
+            }
+          },
+        }),
+        createTool({
+          name: "readFiles",
+          description: "Read files from the sandbox",
+          parameters: z.object({
+            files: z.array(z.string()),
+          }),
+          handler: async ({ files }, { step }) => {
+            return await step?.run("readFiles", async () => {
+              try {
+                const sandbox = await getSandbox(sandboxId);
+                const contents: { path: string; content: string }[] = [];
+                for (const file of files) {
+                  const content = await sandbox.files.read(file);
+                  contents.push({ path: file, content });
+                }
+                return JSON.stringify(contents);
+              } catch (error) {
+                return "Error: " + error;
+              }
+            });
+          },
+        }),
+      ],
+      lifecycle: {
+        onResponse: async ({ result, network }) => {
+          const lastAssitantTextMessageText = lastAssitantTextMessageContent(result);
+          if (lastAssitantTextMessageText && network) {
+            if (lastAssitantTextMessageText.includes("<task_summary>")) {
+              network.state.data.summary = lastAssitantTextMessageText;
+            }
+          }
+          return result;
+        },
+      },
+    });
+
+    const network = createNetwork<AgentState>({
+      name: "coding-agent-network",
+      agents: [codeAgent],
+      maxIter: 15,
+      router: async ({ network }) => {
+        const summary = network.state.data.summary;
+        if (summary) {
+          return;
+        }
+        return codeAgent;
+      },
+    });
+
+    const result = await network.run(event.data.value,{state : state});
+
+    const fragmenttitleGenerator = createAgent({
+      name: "fragment-title-generator",
+      description : "A fragment title generator",
+      system:FRAGMENT_TITLE_PROMPT,
+      model: openai({model : "gpt-4o",defaultParameters : {temperature : 0.1}}),
+    })
+
+    const resGenerator = createAgent({
+      name: "fragment-title-generator",
+      description : "A fragment title generator",
+      system:RESPONSE_PROMPT,
+      model: openai({model : "gpt-4o",defaultParameters : {temperature : 0.1}}),
+    })
+
+    const {output : fragmentTitleOutput} = await fragmenttitleGenerator.run(result.state.data.summary);
+    const {output : responseOutput} = await resGenerator.run(result.state.data.summary);
+
+    const generateFragmentTitle = () =>{
+      if(fragmentTitleOutput[0].type !== "text"){
+        return "Fragment"
+      }
+      if(Array.isArray(fragmentTitleOutput[0].content)){
+        return fragmentTitleOutput[0].content.map((txt)=>txt).join("")
+      }else{
+        return fragmentTitleOutput[0].content
+      }
+    }
+
+    const generateResponse = () =>{
+      if(responseOutput[0].type !== "text"){
+        return "Here you go"
+      }
+      if(Array.isArray(responseOutput[0].content)){
+        return responseOutput[0].content.map((txt)=>txt).join("")
+      }else{
+        return responseOutput[0].content
+      }
+    }
+
+    const isError = !result.state.data.summary || Object.keys(result.state.data.files || {}).length == 0;
+
+    const sandboxUrl = await step.run("get-sandbox-url", async () => {
+      const sandbox = await getSandbox(sandboxId);
+      const host = sandbox.getHost(3000);
+      return `https://${host}`;
+    });
+
+    await step.run("save-result", async () => {
+      if(isError){
+        return await prisma.message.create({
+          data : {
+            projectId : event.data.projectId,
+            content : "Something went wrong, Please Try again.",
+            role : "ASSISTANT",
+            type : "ERROR",
+          }
+        })
+      }
+
+      return await prisma.message.create({
+        data: {
+          projectId : event.data.projectId,
+          content: generateResponse(),
+          role: "ASSISTANT",
+          type: "RESULT",
+          fragment: {
+            create: {
+              sandboxUrl: sandboxUrl,
+              title: generateFragmentTitle(),
+              files: result.state.data.files,
+            },
+          },
+        },
+      });
+    });
+
+    return {
+      url: sandboxUrl,
+      title: "Fragment",
+      files: result.state.data.files,
+      summary: result.state.data.summary,
+    };
+  }
+);

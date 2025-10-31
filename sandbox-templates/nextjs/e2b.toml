@@ -1,0 +1,17 @@
+# This is a config for E2B sandbox template.
+# You can use template ID (a0zyqt13bib7xh8kpgkg) or template name (codex-nextjs-test-v2) to create a sandbox:
+
+# Python SDK
+# from e2b import Sandbox, AsyncSandbox
+# sandbox = Sandbox.create("codex-nextjs-test-v2") # Sync sandbox
+# sandbox = await AsyncSandbox.create("codex-nextjs-test-v2") # Async sandbox
+
+# JS SDK
+# import { Sandbox } from 'e2b'
+# const sandbox = await Sandbox.create('codex-nextjs-test-v2')
+
+team_id = "aabab8e9-f1e6-4d79-a149-82e52e6ae840"
+start_cmd = "/compile_page.sh"
+dockerfile = "e2b.Dockerfile"
+template_name = "codex-nextjs-test-v2"
+template_id = "a0zyqt13bib7xh8kpgkg"
