@@ -4,7 +4,6 @@ import { cn } from "@/lib/utils";
 import React from "react";
 import {format} from "date-fns"
 import Image from "next/image";
-import { Button } from "@/components/ui/button";
 import { ChevronRightIcon, Code2Icon } from "lucide-react";
 
 
@@ -45,7 +44,7 @@ const FragmentCard = ({
     return(
         <button className={cn("flex items-start cursor-pointer gap-2 border rounded-lg bg-muted w-fit px-10 py-4 hover:bg-secondary transition-colors",
             isActiveFragment && "bg-primary text-primary-foreground border-primary hover:bg-primary"
-        )} onClick={()=>onFragmentClick(fragment)} >
+        )} onClick={()=>onFragmentClick(fragment!)} >
             <Code2Icon className="size-4 mt-0.5" />
             <div className="flex flex-col flex-1" >
                 <span className="text-sm font-medium line-clamp-1" >
